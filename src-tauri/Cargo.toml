@@ -1,0 +1,48 @@
+[package]
+name = "paste-boss"
+version = "0.2.0"
+description = "Paste-boss：Windows 剪贴板历史与多选粘贴工具（Alt+V 呼出面板）"
+license = "MIT"
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "paste_boss_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+arboard = "3.4.1"
+# tray-icon：系统托盘（右下角通知区）里显示程序图标
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 只在后端生成缩略图/PNG，不需要 jpeg、webp 等多余解码器
+image = { version = "0.25", default-features = false, features = ["png"] }
+base64 = "0.23"
+
+# 多选粘贴多张图片：Windows 剪贴板要同时写「文字 + 文件列表（CF_HDROP）」，
+# arboard 一次只能写一种格式，所以直接用底层的 clipboard-win（本来就是 arboard 的依赖）。
+[target.'cfg(target_os = "windows")'.dependencies]
+clipboard-win = "5"
+
+# 开发档也开 O2：image 的缩放/PNG 编码是泛型函数，会被实例化进本 crate，
+# 若本 crate 不优化则会慢十几倍（实测 1080p 缩略图 661ms，优化后应降到几十毫秒）。
+# 代价只是本 crate 首次编译略慢，日常增量编译依然很快。
+[profile.dev]
+opt-level = 2
+
+# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

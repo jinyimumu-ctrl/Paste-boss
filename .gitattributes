@@ -1,0 +1,18 @@
+# 仓库内统一按 LF 存储，避免不同机器上换行反复变动
+* text=auto
+
+# 批处理 / PowerShell 必须保留 CRLF，否则 cmd 解析会出问题
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制资源不做换行与文本差异处理
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.exe binary
+*.dll binary
+*.zip binary
