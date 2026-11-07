@@ -33,3 +33,6 @@ release-package/
 
 # 工具本地的忽略配置，与项目无关
 .clineignore
+
+# 本地产品需求文档，仅作者自用，不进公开仓库
+Paste-boss prd.md

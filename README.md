@@ -4,8 +4,6 @@ Windows 上的剪贴板历史与多选粘贴工具。默认按 `Alt+V` 呼出面
 
 技术栈：Tauri 2 + Vue 3 + Rust。程序常驻托盘，纯本地运行，不联网。
 
-产品需求文档（功能规则、验收标准、边界值、版本规划）见 [Paste-boss prd.md](Paste-boss%20prd.md)。
-
 ## 功能
 
 - **自动记录**：复制的文字和截图自动入库，最新在最前，条数上限可调（默认 20，范围 5–200）。
@@ -112,4 +110,8 @@ src-tauri/src/
 
 本项目以 [MIT](LICENSE) 许可证发布。
 第三方组件的许可声明见 [THIRD-PARTY-NOTICE.md](THIRD-PARTY-NOTICE.md)。
+
+---
+
+最后更新：2026-11-07
 
