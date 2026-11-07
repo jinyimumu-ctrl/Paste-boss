@@ -1,0 +1,35 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# 本地构建/冒烟调试留下的临时文件（_build.cmd 是要保留的构建入口）
+_*.txt
+_*.ps1
+_rel*.cmd
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# 发行包（绿色版 exe / 快捷方式 / 随包说明）：用 GitHub Releases 分发，不进仓库
+release-package/
+
+# 工具本地的忽略配置，与项目无关
+.clineignore
