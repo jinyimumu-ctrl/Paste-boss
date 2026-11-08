@@ -22,7 +22,7 @@ const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 /// 设置面板要显示的程序状态
 #[derive(Serialize)]
 pub struct AppStatus {
-    /// 程序版本号，来自 Cargo.toml（界面、安装包、程序本体完全一致）
+    /// 程序版本号，来自 Cargo.toml（安装包与程序本体同源；界面不再显示）
     pub version: String,
     /// 当前是否已经登记了开机自启
     pub autostart: bool,

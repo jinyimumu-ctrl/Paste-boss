@@ -324,7 +324,7 @@ function onKeydown(event: KeyboardEvent) {
 }
 
 // ---------------------------------------------------------------------------
-// 设置面板：版本号 / 呼出快捷键 / 开机自启 / 历史上限 / 数据目录
+// 设置面板：呼出快捷键 / 开机自启 / 历史上限 / 数据目录
 // ---------------------------------------------------------------------------
 /** 与后端 settings::AppStatus / lib.rs 的 AppStatus 对应 */
 interface AppStatus {
@@ -685,10 +685,7 @@ onBeforeUnmount(() => {
     <!-- data-tauri-drag-region：这条空白处可以直接按住拖动窗口
          （系统标题栏太窄，给一块更大的抓取区；搜索框、按钮这些交互元素不加） -->
     <header class="header" data-tauri-drag-region>
-      <h1 data-tauri-drag-region>
-        📋 Paste-boss
-        <span class="version-badge">v{{ status?.version ?? '…' }}</span>
-      </h1>
+      <h1 data-tauri-drag-region>📋 Paste-boss</h1>
       <input
         ref="searchInput"
         v-model="query"
@@ -791,7 +788,7 @@ onBeforeUnmount(() => {
       </div>
     </footer>
 
-    <!-- 设置面板：版本 / 呼出快捷键 / 开机自启 / 暂停记录 / 历史条数 / 数据目录 / 清空历史 -->
+    <!-- 设置面板：呼出快捷键 / 开机自启 / 暂停记录 / 历史条数 / 数据目录 / 清空历史 -->
     <div v-if="settingsOpen" class="modal-mask" @click.self="closeSettings">
       <section class="modal">
         <header class="modal-header">
@@ -802,13 +799,6 @@ onBeforeUnmount(() => {
         </header>
 
         <div class="modal-body">
-          <div class="setting-row">
-            <div class="setting-text">
-              <span class="setting-title">版本</span>
-            </div>
-            <span class="setting-value">v{{ status?.version ?? '—' }}</span>
-          </div>
-
           <!-- 呼出快捷键：点「修改」后直接按下组合键，后端注册成功才算改好 -->
           <div class="setting-row">
             <div class="setting-text">
@@ -1218,17 +1208,6 @@ body {
   font-size: 12px;
   pointer-events: none;
 }
-/* 标题旁边的版本号 */
-.version-badge {
-  margin-left: 8px;
-  padding: 1px 6px;
-  border-radius: 999px;
-  background-color: rgba(74, 222, 128, 0.14);
-  color: #4ade80;
-  font-size: 11px;
-  font-weight: 600;
-  vertical-align: middle;
-}
 /* 只有图标的小按钮（设置 / 关闭） */
 .icon-btn {
   flex: 0 0 auto;
@@ -1329,11 +1308,6 @@ body {
 /* 录制快捷键时的问题提示（例如组合键已被占用） */
 .setting-desc.error {
   color: #f87171;
-}
-.setting-value {
-  flex: 0 0 auto;
-  font-size: 13px;
-  color: #4ade80;
 }
 /* 一行里放两个按钮（数据目录：打开 / 日志） */
 .setting-actions {

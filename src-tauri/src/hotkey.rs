@@ -1,9 +1,12 @@
-//! 全局快捷键 + 窗口「贴边弹出」+ 点卡片自动粘贴。
+//! 全局快捷键 + 窗口「跟着光标弹出」+ 点卡片自动粘贴。
 //!
 //! 全部直接用 Win32 API 实现，不额外引入插件依赖：
 //! - 快捷键：`RegisterHotKey(hwnd = NULL)` 会把 `WM_HOTKEY` 投递到**调用它的那个线程**的消息队列，
 //!   所以这里开一条专用线程，阻塞在 `GetMessageW` 上等按键（不占 CPU），
 //!   收到按键后回调 Tauri 的窗口 API（这些 API 本身是线程安全的）。
+//! - 弹出位置：用 `GetGUIThreadInfo` 取前台窗口里「文字插入点（光标）」的坐标，
+//!   把面板贴在插入点下方弹出来（和 Win+V 一样），手不用从输入框跑去屏幕右上角；
+//!   取不到插入点时（桌面、图片查看器等）退回鼠标位置。
 //! - 自动粘贴：唤出面板时记下当时的前台窗口，点卡片后 `SetForegroundWindow` 切回去，
 //!   再用 `SendInput` 补一个 Ctrl+V，用户就不用自己按了。
 
@@ -24,6 +27,8 @@ const MAIN_WINDOW: &str = "main";
 const HOTKEY_ID: i32 = 1;
 /// 与屏幕边缘留的空隙（物理像素）
 const SCREEN_MARGIN: i32 = 16;
+/// 面板和插入点（或鼠标）之间留的空隙（物理像素）：贴太近会盖住正在输入的那一行
+const ANCHOR_GAP: i32 = 8;
 /// 等目标窗口拿到焦点：5ms × 40 次 = 最多 200ms，通常第一轮就到位
 const FOCUS_WAIT_STEP: Duration = Duration::from_millis(5);
 const FOCUS_WAIT_STEPS: usize = 40;
@@ -479,6 +484,36 @@ struct Point {
     y: i32,
 }
 
+/// Win32 的 RECT
+#[cfg(target_os = "windows")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Rect {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+/// Win32 的 GUITHREADINFO。
+///
+/// `GetGUIThreadInfo` 用它回传一个线程的界面状态，其中 `hwnd_caret` / `rc_caret`
+/// 就是「文字插入点」所在控件和它的位置 —— Win+V 的面板就是贴着这个位置弹出来的。
+/// 字段顺序和 Windows 头文件完全一致，`cb_size` 必须填结构体实际大小（x64 与 x86 不同）。
+#[cfg(target_os = "windows")]
+#[repr(C)]
+struct GuiThreadInfo {
+    cb_size: u32,
+    flags: u32,
+    hwnd_active: *mut c_void,
+    hwnd_focus: *mut c_void,
+    hwnd_capture: *mut c_void,
+    hwnd_menu_owner: *mut c_void,
+    hwnd_move_size: *mut c_void,
+    hwnd_caret: *mut c_void,
+    rc_caret: Rect,
+}
+
 /// Win32 的 MSG（GetMessageW 会往这块内存里写数据，字段顺序不能改）
 #[cfg(target_os = "windows")]
 #[repr(C)]
@@ -545,6 +580,12 @@ unsafe extern "system" {
     fn SetForegroundWindow(hwnd: *mut c_void) -> i32;
     fn IsWindow(hwnd: *mut c_void) -> i32;
     fn IsIconic(hwnd: *mut c_void) -> i32;
+    /// 取前台窗口所属的线程 id（`GetGUIThreadInfo` 是按线程查询的）
+    fn GetWindowThreadProcessId(hwnd: *mut c_void, process_id: *mut u32) -> u32;
+    /// 取某个线程的界面状态：里面带着「文字插入点」的位置
+    fn GetGUIThreadInfo(thread_id: u32, info: *mut GuiThreadInfo) -> i32;
+    /// 客户区坐标 → 屏幕坐标（插入点坐标是相对它所在控件的）
+    fn ClientToScreen(hwnd: *mut c_void, point: *mut Point) -> i32;
     /// 查询按键/鼠标键此刻的状态（最高位为 1 表示正按着）
     fn GetAsyncKeyState(vk: i32) -> i16;
     fn GetClassNameW(hwnd: *mut c_void, buffer: *mut u16, max_count: i32) -> i32;
@@ -783,10 +824,151 @@ pub fn toggle_window(app_handle: &AppHandle) {
     }
 }
 
+/// 面板贴着的位置（屏幕物理像素）
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Anchor {
+    /// 插入点 / 鼠标的左边：面板左边缘对齐到这里
+    x: i32,
+    /// 插入点的上边：下方放不下时，面板翻到这条线的上面
+    top: i32,
+    /// 插入点的下边：正常情况下从这里往下弹
+    bottom: i32,
+}
+
+/// 显示器工作区（不含任务栏），屏幕物理像素
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WorkArea {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+impl WorkArea {
+    /// 面板左上角允许的最小值（留出 SCREEN_MARGIN 的边距）
+    fn origin(self) -> (i32, i32) {
+        (self.x + SCREEN_MARGIN, self.y + SCREEN_MARGIN)
+    }
+
+    /// 面板右下角允许的最大值（留出 SCREEN_MARGIN 的边距）
+    fn limit(self) -> (i32, i32) {
+        (
+            self.x + self.width - SCREEN_MARGIN,
+            self.y + self.height - SCREEN_MARGIN,
+        )
+    }
+}
+
+/// 算出面板左上角应该放在哪。
+///
+/// 规则（和 Win+V 一样）：
+/// 1. 默认贴在插入点**下方**弹出，左边缘对齐插入点；
+/// 2. 贴到右边 / 下边会超出工作区就往回收；
+/// 3. 下方实在放不下（插入点已经靠近屏幕底部）就翻到插入点**上方**。
+///
+/// 抽成纯函数，测试里就能把「贴右边缘 / 翻上去 / 屏幕外坐标」这些情况全部钉死。
+fn anchor_origin(anchor: Anchor, size: (i32, i32), area: WorkArea) -> (i32, i32) {
+    let (width, height) = size;
+    let (left, top) = area.origin();
+    let (right, bottom) = area.limit();
+
+    // 水平：左边缘对齐插入点；右边放不下就整块左移，最多移到左边的边距上
+    let x = anchor.x.min(right - width).max(left);
+
+    // 垂直：优先往下弹；下面放不下就翻到上面；
+    // 上下都放不下（面板比工作区还高）就贴住工作区，总比把面板丢到屏幕外强
+    let below = anchor.bottom + ANCHOR_GAP;
+    let above = anchor.top - ANCHOR_GAP - height;
+    let y = if below + height <= bottom {
+        below.max(top)
+    } else if above >= top {
+        above
+    } else {
+        (bottom - height).max(top)
+    };
+
+    (x, y)
+}
+
+/// 取当前前台窗口里「文字插入点」的屏幕坐标。
+///
+/// Win+V 就是贴着它弹出来的。取不到时返回 None，由调用方退回鼠标位置 ——
+/// 绝不能因为窗口没有插入点就不显示面板。
+#[cfg(target_os = "windows")]
+fn caret_anchor() -> Option<Anchor> {
+    // SAFETY: 下面全是只读查询；结构体按 Win32 的布局定义，指针都指向本栈上的合法内存。
+    unsafe {
+        let foreground = GetForegroundWindow();
+        if foreground.is_null() {
+            return None;
+        }
+        let mut process_id = 0u32;
+        let thread_id = GetWindowThreadProcessId(foreground, &mut process_id);
+        if thread_id == 0 {
+            return None;
+        }
+
+        let mut info = MaybeUninit::<GuiThreadInfo>::zeroed();
+        let info_ptr = info.as_mut_ptr();
+        (*info_ptr).cb_size = size_of::<GuiThreadInfo>() as u32;
+        if GetGUIThreadInfo(thread_id, info_ptr) == 0 {
+            return None;
+        }
+        let info = info.assume_init();
+        // hwndCaret 为空 = 这个窗口此刻没有可见的插入点（桌面、图片预览、视频……）
+        if info.hwnd_caret.is_null() {
+            return None;
+        }
+
+        // rcCaret 是相对 hwndCaret 客户区的坐标，得转成屏幕坐标才能拿来摆窗口
+        let mut origin = Point {
+            x: info.rc_caret.left,
+            y: info.rc_caret.top,
+        };
+        let mut corner = Point {
+            x: info.rc_caret.right,
+            y: info.rc_caret.bottom,
+        };
+        if ClientToScreen(info.hwnd_caret, &mut origin) == 0
+            || ClientToScreen(info.hwnd_caret, &mut corner) == 0
+        {
+            return None;
+        }
+
+        Some(Anchor {
+            x: origin.x,
+            top: origin.y,
+            bottom: corner.y,
+        })
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn caret_anchor() -> Option<Anchor> {
+    // 其它平台暂时没有取插入点的实现，直接用鼠标位置
+    None
+}
+
+/// 退路：用鼠标尖的位置当锚点。
+///
+/// 右键托盘图标、或者目标窗口本来就没有插入点时，鼠标就在用户手边，
+/// 贴在鼠标下方也比固定弹到屏幕右上角顺手得多。
+fn cursor_anchor(app_handle: &AppHandle) -> Option<Anchor> {
+    let cursor = app_handle.cursor_position().ok()?;
+    let x = cursor.x.round() as i32;
+    let y = cursor.y.round() as i32;
+    Some(Anchor {
+        x,
+        top: y,
+        bottom: y,
+    })
+}
+
 /// 显示窗口并抢焦点。
 ///
-/// 位置跟随鼠标所在的显示器，贴在**工作区右边缘**弹出；
-/// 工作区放不下（比如窗口比屏幕还宽）时，自动往左挪到能放下的位置。
+/// 位置贴着**文字插入点（光标）**弹出，和 Win+V 的手感一致：面板就出现在正在输入的地方旁边，
+/// 不用把鼠标从输入框挪到屏幕右上角。目标窗口没有插入点（桌面、图片查看器等）时退回鼠标位置。
+/// 多屏时按锚点所在的显示器计算工作区，放不下会自动往回收，必要时翻到插入点上方。
 pub fn show_window(app_handle: &AppHandle) {
     let Some(window) = app_handle.get_webview_window(MAIN_WINDOW) else {
         eprintln!("[hotkey] 找不到主窗口 {MAIN_WINDOW}");
@@ -804,28 +986,34 @@ pub fn show_window(app_handle: &AppHandle) {
         capture_previous_foreground(&window);
     }
 
-    // 多屏时跟着鼠标走，比固定弹在主屏更符合直觉
-    let monitor = app_handle
-        .cursor_position()
-        .ok()
-        .and_then(|cursor| app_handle.monitor_from_point(cursor.x, cursor.y).ok().flatten());
+    // 锚点优先取「正在打字的地方」（插入点），取不到才用鼠标尖：
+    // 这样按快捷键时面板就在输入框下方，和 Win+V 一样不用去右上角找
+    let anchor = caret_anchor().or_else(|| cursor_anchor(app_handle));
+    if let Some(anchor) = anchor {
+        // 多屏时按锚点所在的显示器算工作区（插入点可能在副屏上）
+        let monitor = app_handle
+            .monitor_from_point(anchor.x as f64, anchor.top as f64)
+            .ok()
+            .flatten();
 
-    if let Some(monitor) = monitor {
-        let area = monitor.work_area();
-        if let Ok(size) = window.outer_size() {
-            let right_edge = area.position.x + area.size.width as i32;
-            let bottom_edge = area.position.y + area.size.height as i32;
+        if let Some(monitor) = monitor {
+            let area = monitor.work_area();
+            if let Ok(size) = window.outer_size() {
+                let work_area = WorkArea {
+                    x: area.position.x,
+                    y: area.position.y,
+                    width: area.size.width as i32,
+                    height: area.size.height as i32,
+                };
+                let (x, y) = anchor_origin(
+                    anchor,
+                    (size.width as i32, size.height as i32),
+                    work_area,
+                );
 
-            // 贴右边缘，但保证不超出工作区左边界
-            let x = (right_edge - size.width as i32 - SCREEN_MARGIN)
-                .max(area.position.x + SCREEN_MARGIN);
-            // 顶部对齐，窗口太高时往下夹
-            let y = (area.position.y + SCREEN_MARGIN)
-                .min(bottom_edge - size.height as i32 - SCREEN_MARGIN)
-                .max(area.position.y);
-
-            if let Err(err) = window.set_position(PhysicalPosition::new(x, y)) {
-                eprintln!("[hotkey] 设置窗口位置失败: {err}");
+                if let Err(err) = window.set_position(PhysicalPosition::new(x, y)) {
+                    eprintln!("[hotkey] 设置窗口位置失败: {err}");
+                }
             }
         }
     }
@@ -1221,3 +1409,79 @@ mod blur_tests {
         assert!(!should_hide_after_blur(&state));
     }
 }
+
+/// 弹出位置的算法表（纯函数，不依赖真实屏幕，任何平台都能跑）。
+///
+/// 对应真实报障：「按 Alt+V 面板永远出现在右上角，手要跑很远才能点」。
+#[cfg(test)]
+mod anchor_tests {
+    use super::{Anchor, WorkArea, anchor_origin};
+
+    /// 1920×1080 的主屏（工作区从 0,0 开始，任务栏已经扣掉）
+    fn area() -> WorkArea {
+        WorkArea {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        }
+    }
+
+    /// 一个普通的插入点：x = 左边缘，top/bottom = 上下边
+    fn caret(x: i32, top: i32, bottom: i32) -> Anchor {
+        Anchor { x, top, bottom }
+    }
+
+    #[test]
+    fn panel_drops_below_caret() {
+        // 输入框在屏幕中间：面板贴在光标下方，左边缘对齐光标
+        let (x, y) = anchor_origin(caret(300, 200, 216), (400, 500), area());
+        assert_eq!(x, 300);
+        assert_eq!(y, 216 + 8);
+    }
+
+    #[test]
+    fn panel_is_pulled_left_at_right_edge() {
+        // 光标已经贴到右边：面板整块往左收，右边缘离屏幕边留 16px
+        let (x, _) = anchor_origin(caret(1800, 400, 416), (400, 500), area());
+        assert_eq!(x, 1920 - 16 - 400);
+    }
+
+    #[test]
+    fn panel_flips_above_caret_when_no_room_below() {
+        // 光标靠近屏幕底部、下方放不下 → 翻到光标上方
+        let (x, y) = anchor_origin(caret(600, 880, 896), (400, 700), area());
+        assert_eq!(x, 600);
+        assert_eq!(y, 880 - 8 - 700);
+    }
+
+    #[test]
+    fn panel_stays_inside_area_when_taller_than_screen() {
+        // 面板比工作区还高（用户拉到超大）：贴住工作区顶部，不能跑到屏幕外
+        let (_, y) = anchor_origin(caret(600, 500, 516), (400, 2000), area());
+        assert_eq!(y, 16);
+    }
+
+    #[test]
+    fn secondary_monitor_with_negative_origin() {
+        // 副屏在主屏左边：坐标是负数，锚点算法不能拿 0 当地板
+        let left = WorkArea {
+            x: -1920,
+            y: -200,
+            width: 1920,
+            height: 1080,
+        };
+        let (x, y) = anchor_origin(caret(-1930, -150, -134), (400, 500), left);
+        assert_eq!(x, -1920 + 16);
+        assert_eq!(y, -134 + 8);
+    }
+
+    #[test]
+    fn cursor_fallback_is_treated_like_a_caret() {
+        // 没有插入点时用鼠标尖（top == bottom），同样往下弹
+        let (x, y) = anchor_origin(caret(640, 360, 360), (400, 500), area());
+        assert_eq!(x, 640);
+        assert_eq!(y, 368);
+    }
+}
+

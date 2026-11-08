@@ -19,7 +19,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 mod config;
 // 历史落盘（重启后还能看到之前的记录）
 mod history;
-// 全局快捷键 + 窗口贴边弹出
+// 全局快捷键 + 窗口跟着光标弹出
 mod hotkey;
 // 日志落盘 + panic 钩子
 mod logging;
